@@ -1,0 +1,29 @@
+# Dépendances et caches locaux (réinstallés dans l'image)
+node_modules
+.npm
+.angular
+
+# Sorties de build et de tests
+dist
+coverage
+out-tsc
+tmp
+
+# Git et éditeurs
+.git
+.gitignore
+.vscode
+.idea
+
+# Fichiers Docker et déploiement (inutiles pour le build)
+Dockerfile
+.dockerignore
+docker-compose.yml
+# k8s
+# values.tpl.yaml
+
+# Divers
+*.md
+*.log
+.DS_Store
+Thumbs.db

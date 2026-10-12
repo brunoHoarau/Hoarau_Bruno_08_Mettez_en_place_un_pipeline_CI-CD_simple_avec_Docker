@@ -1,0 +1,9 @@
+# Anciens historiques git des applications (dépôts d'origine OpenClassrooms)
+/.depots-origine/
+
+# Rapports générés par run-tests.sh
+/test-results/
+
+# Fichiers locaux
+.DS_Store
+Thumbs.db
