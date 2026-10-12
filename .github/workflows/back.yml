@@ -1,0 +1,202 @@
+name: CI - Back Workshop Organizer (Java)
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "workshop-organizer/**"
+      - "run-tests.sh"
+      - ".github/workflows/back.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "workshop-organizer/**"
+      - "run-tests.sh"
+      - ".github/workflows/back.yml"
+  workflow_dispatch:
+
+# Paramètres centralisés pour rendre le workflow facilement configurable
+env:
+  APP_DIR: workshop-organizer
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/workshop-organizer   # mis en minuscules par metadata-action
+  GITLEAKS_VERSION: "8.24.0"
+  JAVA_VERSION: "21"
+  APP_PORT: "8080"
+  # Base PostgreSQL éphémère utilisée uniquement pour le test de l'image en CI
+  POSTGRES_DB: workshopsdb
+  POSTGRES_USER: workshops_user
+  POSTGRES_PASSWORD: ci-only-password
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------- Étape 2 : tests unitaires + rapport JUnit ----------
+  test:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write          # publication du rapport JUnit dans l'onglet Checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installation du JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Configuration de Gradle (cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Exécution des tests (JUnit)
+        run: |
+          chmod +x ./run-tests.sh
+          ./run-tests.sh "$APP_DIR"
+
+      - name: Publication du rapport JUnit
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/**/*.xml
+          check_name: Rapport JUnit - Java
+
+      - name: Archivage des rapports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-java
+          path: test-results/
+
+  # ---------- Sécurité : détection de secrets dans le code et l'historique (TS-04) ----------
+  secrets-scan:
+    name: Scan des secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (historique complet)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Installation de Gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # Échoue (code de sortie 1) si un secret est détecté ; faux positifs marqués « gitleaks:allow »
+      - name: Analyse Gitleaks
+        run: gitleaks git . --redact --verbose --no-banner --report-format json --report-path gitleaks-report.json
+
+      - name: Archivage du rapport Gitleaks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report-back
+          path: gitleaks-report.json
+          if-no-files-found: ignore
+
+  # ---------- Étape 3 : build, validation et publication de l'image ----------
+  build:
+    name: Build & push Docker (GHCR)
+    needs: [test, secrets-scan]   # pas de publication si un test ou le scan échoue
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push vers ghcr.io avec le GITHUB_TOKEN
+    services:
+      # Base de données nécessaire au démarrage de l'application lors du smoke test.
+      # Le contexte `env` n'est pas disponible ici : valeurs identiques à celles du bloc env global.
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_DB: workshopsdb
+          POSTGRES_USER: workshops_user
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U workshops_user -d workshopsdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configuration de Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Connexion au GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags : <branche>-<sha court> (ex. main-1a2b3c4), <branche>, et latest sur la branche par défaut
+      - name: Calcul des tags et labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-,format=short,enable=${{ github.event_name != 'pull_request' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 1) Build chargé dans le démon Docker local pour pouvoir le tester avant publication
+      - name: Build de l'image (locale)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          load: true
+          tags: app:ci
+          cache-from: type=gha,scope=back
+          cache-to: type=gha,mode=max,scope=back
+
+      # 2) Validation : l'application démarre, se connecte à PostgreSQL et répond sur l'API
+      - name: Test de l'image (smoke test)
+        run: |
+          docker run -d --name smoke --network host \
+            -e SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5432/${POSTGRES_DB}" \
+            -e SPRING_DATASOURCE_USERNAME="${POSTGRES_USER}" \
+            -e SPRING_DATASOURCE_PASSWORD="${POSTGRES_PASSWORD}" \
+            app:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://localhost:${APP_PORT}/api/notions"; then
+              echo "API opérationnelle"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "L'application ne répond pas" >&2
+          docker logs smoke
+          exit 1
+
+      - name: Arrêt du conteneur de test
+        if: always()
+        run: docker rm -f smoke || true
+
+      # 3) Publication : réutilise le cache du build précédent (pas de rebuild complet)
+      - name: Push de l'image vers GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=back
+
+      - name: Résumé
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "### Image publiée" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
