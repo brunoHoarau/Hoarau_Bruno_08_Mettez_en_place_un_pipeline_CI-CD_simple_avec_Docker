@@ -1,7 +1,15 @@
+# Rotation des logs Docker commune aux services : 3 fichiers de 10 Mo maximum
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:13
     container_name: workshop-db
+    restart: unless-stopped
 
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -11,8 +19,9 @@ services:
     secrets:
       - db_password
 
+    # Exposé uniquement sur la machine hôte (administration, sauvegardes), pas sur le réseau
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
     volumes:
       - db-data:/var/lib/postgresql/data
@@ -24,9 +33,13 @@ services:
       retries: 10
       start_period: 10s
 
+    logging: *default-logging
+
   app:
     build: .
+    image: workshop-organizer:latest
     container_name: workshop-app
+    restart: unless-stopped
 
     depends_on:
       db:
@@ -42,6 +55,16 @@ services:
 
     ports:
       - "8080:8080"
+
+    # L'API répond sur /api/notions dès que Spring Boot est démarré et connecté à PostgreSQL
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/notions"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    logging: *default-logging
 
 secrets:
   db_password:
