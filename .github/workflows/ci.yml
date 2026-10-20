@@ -13,6 +13,15 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      application:
+        description: "Application à traiter"
+        type: choice
+        default: toutes
+        options:
+          - toutes
+          - olympic-games-starter
+          - workshop-organizer
 
 # Une nouvelle exécution sur la même branche annule la précédente (sauf sur main : publication)
 concurrency:
@@ -62,16 +71,21 @@ jobs:
               - "run-tests.sh"
               - ".github/workflows/ci.yml"
 
-      # Produit la matrice [{app, type}] ; lancement manuel : les deux applications.
+      # Produit la matrice [{app, type}] ; lancement manuel : l'application choisie (ou toutes).
       # Même règle de détection que run-tests.sh.
       - name: Construction de la matrice
         id: select
         env:
           EVENT: ${{ github.event_name }}
           CHANGED: ${{ steps.filter.outputs.changes }}
+          CHOICE: ${{ inputs.application }}
         run: |
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
-            apps='["olympic-games-starter","workshop-organizer"]'
+            if [[ "$CHOICE" == "toutes" ]]; then
+              apps='["olympic-games-starter","workshop-organizer"]'
+            else
+              apps="[\"$CHOICE\"]"
+            fi
           else
             apps="$CHANGED"
           fi
