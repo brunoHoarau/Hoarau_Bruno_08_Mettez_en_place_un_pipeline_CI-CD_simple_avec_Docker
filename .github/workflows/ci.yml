@@ -227,7 +227,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write        # push du tag provisoire candidate-<sha>
+      packages: write        # push du tag provisoire candidate-<sha> et du cache de build
     strategy:
       fail-fast: false
       matrix:
@@ -242,6 +242,18 @@ jobs:
       - name: Configuration de Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Connexion avant le build : le cache de build est stocké sur GHCR (voir ci-dessous)
+      - name: Connexion au GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Référence du cache : <image>:buildcache (nom d'image en minuscules, exigé par le registre)
+      - name: Référence du cache de build
+        run: echo "CACHE_REF=${REGISTRY}/${IMAGE_NAME,,}:buildcache" >> "$GITHUB_ENV"
+
       # Labels OCI (source, révision…) posés dès le build : l'image publiée est celle construite ici
       - name: Calcul des labels
         id: meta
@@ -251,6 +263,11 @@ jobs:
 
       # 1) Build chargé dans le démon Docker local pour pouvoir le tester.
       # SKIP_TESTS=true (image Java) : les tests sont déjà exécutés par le job test.
+      # Cache de build dans le registre (tag buildcache) plutôt que dans le cache GitHub Actions :
+      #   - un tag de registre est remplacé à chaque export, alors qu'une entrée du cache GitHub
+      #     est immuable (l'index n'était pas mis à jour et le build Java était refait à chaque run) ;
+      #   - il est partagé entre branches : main profite du cache construit sur une branche.
+      # Pull request : cache lu seulement, jamais écrit.
       - name: Build de l'image
         uses: docker/build-push-action@v6
         with:
@@ -259,8 +276,8 @@ jobs:
           tags: app:ci
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.type == 'java' && 'SKIP_TESTS=true' || '' }}
-          cache-from: type=gha,scope=${{ matrix.app }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0},mode=max,image-manifest=true,oci-mediatypes=true', env.CACHE_REF) || '' }}
 
       # 2a) Validation front : l'image démarre et Nginx sert bien l'application Angular
       - name: Test de l'image (smoke test Angular)
@@ -326,14 +343,6 @@ jobs:
 
       # 3) Push de l'image testée, telle quelle (pas de rebuild), sous le tag provisoire.
       # Inutile pour une pull request : rien n'y est publié.
-      - name: Connexion au GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Push de l'image candidate
         if: github.event_name != 'pull_request'
         run: |
