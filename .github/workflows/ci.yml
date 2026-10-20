@@ -71,12 +71,16 @@ jobs:
               - "run-tests.sh"
               - ".github/workflows/ci.yml"
 
-      # Produit la matrice [{app, type}] ; lancement manuel : l'application choisie (ou toutes).
-      # Même règle de détection que run-tests.sh.
+      # Produit la matrice [{app, type}] :
+      #   - lancement manuel : l'application choisie (ou toutes) ;
+      #   - push sur main    : toujours les deux applications (version livrée entièrement validée) ;
+      #   - sinon            : seulement les applications modifiées.
+      # Même règle de détection du type que run-tests.sh.
       - name: Construction de la matrice
         id: select
         env:
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           CHANGED: ${{ steps.filter.outputs.changes }}
           CHOICE: ${{ inputs.application }}
         run: |
@@ -86,6 +90,8 @@ jobs:
             else
               apps="[\"$CHOICE\"]"
             fi
+          elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
+            apps='["olympic-games-starter","workshop-organizer"]'
           else
             apps="$CHANGED"
           fi
