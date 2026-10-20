@@ -380,15 +380,18 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # Ajout des tags définitifs sur l'image candidate, directement dans le registre
+      # Ajout des tags définitifs sur l'image candidate, directement dans le registre.
+      # skopeo (préinstallé sur le runner, identifiants lus dans la config docker login)
+      # recopie le manifeste tel quel : --preserve-digests fait échouer l'étape si le
+      # digest publié devait différer de celui de l'image testée.
       - name: Promotion de l'image candidate
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           candidate="${REGISTRY}/${IMAGE_NAME,,}:candidate-${GITHUB_SHA}"
-          args=()
-          for tag in $TAGS; do args+=(--tag "$tag"); done
-          docker buildx imagetools create "${args[@]}" "$candidate"
+          for tag in $TAGS; do
+            skopeo copy --all --preserve-digests "docker://$candidate" "docker://$tag"
+          done
           echo "CANDIDATE=$candidate" >> "$GITHUB_ENV"
 
       - name: Résumé
@@ -398,8 +401,7 @@ jobs:
           {
             echo "### Image publiée : ${APP_DIR}"
             echo '```'
-            docker buildx imagetools inspect "$CANDIDATE" | head -3
-            echo
+            echo "Digest : $(skopeo inspect --format '{{.Digest}}' "docker://$CANDIDATE")"
             echo "$TAGS"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
