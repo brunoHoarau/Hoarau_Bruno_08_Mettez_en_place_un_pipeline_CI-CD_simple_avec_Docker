@@ -4,8 +4,10 @@ name: CI
 #   changes      → liste des applications impactées et type de projet (node / java)
 #   test         → tests unitaires + rapport JUnit, une exécution par application (matrice)
 #   secrets-scan → détection de secrets dans le code et l'historique (Gitleaks)
-#   build        → build + smoke test de l'image, par application, en parallèle des tests
-#   publish      → push sur GHCR de l'image testée, seulement si tests, scan et smoke test sont verts
+#   build        → build + smoke test de l'image, par application, en parallèle des tests,
+#                  puis push de l'image testée sur GHCR sous un tag provisoire candidate-<sha>
+#   publish      → promotion de l'image candidate (tags définitifs), seulement si tests, scan
+#                  et smoke test sont verts
 
 on:
   push:
@@ -215,7 +217,8 @@ jobs:
           retention-days: 14
 
   # ---------- Build et validation de l'image (en parallèle des tests) ----------
-  # Ne publie rien : l'image testée est transmise au job publish sous forme d'artefact
+  # L'image testée est poussée sous un tag provisoire candidate-<sha> : seul le job publish
+  # lui attribue les tags définitifs (branche, latest…), et seulement si tout est vert.
   build:
     name: Build & smoke test Docker - ${{ matrix.app }}
     needs: changes
@@ -224,6 +227,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      packages: write        # push du tag provisoire candidate-<sha>
     strategy:
       fail-fast: false
       matrix:
@@ -320,23 +324,27 @@ jobs:
           docker rm -f smoke smoke-db 2>/dev/null || true
           docker network rm smoke-net 2>/dev/null || true
 
-      # 3) Export de l'image testée, transmise telle quelle au job publish (pas de rebuild).
+      # 3) Push de l'image testée, telle quelle (pas de rebuild), sous le tag provisoire.
       # Inutile pour une pull request : rien n'y est publié.
-      - name: Export de l'image testée
+      - name: Connexion au GitHub Container Registry
         if: github.event_name != 'pull_request'
-        run: docker save app:ci | gzip -1 > image.tar.gz
-
-      - name: Transmission de l'image au job publish
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: docker/login-action@v3
         with:
-          name: image-${{ matrix.app }}
-          path: image.tar.gz
-          compression-level: 0   # déjà compressée
-          retention-days: 1
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push de l'image candidate
+        if: github.event_name != 'pull_request'
+        run: |
+          candidate="${REGISTRY}/${IMAGE_NAME,,}:candidate-${GITHUB_SHA}"
+          docker tag app:ci "$candidate"
+          docker push "$candidate"
 
   # ---------- Publication de l'image testée ----------
-  # Porte unique vers GHCR : tests, scan des secrets et smoke test doivent tous être verts
+  # Porte unique vers les tags définitifs : tests, scan des secrets et smoke test doivent tous
+  # être verts. L'image n'est ni reconstruite ni retéléchargée : les tags sont ajoutés côté
+  # registre sur l'image candidate (même digest que l'image validée par le smoke test).
   publish:
     name: Publication GHCR - ${{ matrix.app }}
     needs: [changes, test, secrets-scan, build]
@@ -354,14 +362,6 @@ jobs:
       APP_DIR: ${{ matrix.app }}
       IMAGE_NAME: ${{ github.repository }}/${{ matrix.app }}
     steps:
-      - name: Récupération de l'image testée
-        uses: actions/download-artifact@v4
-        with:
-          name: image-${{ matrix.app }}
-
-      - name: Chargement de l'image
-        run: gunzip -c image.tar.gz | docker load
-
       - name: Connexion au GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -380,15 +380,16 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # Même image (même identifiant) que celle validée par le smoke test, sous chaque tag
-      - name: Push de l'image vers GHCR
+      # Ajout des tags définitifs sur l'image candidate, directement dans le registre
+      - name: Promotion de l'image candidate
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          for tag in $TAGS; do
-            docker tag app:ci "$tag"
-            docker push "$tag"
-          done
+          candidate="${REGISTRY}/${IMAGE_NAME,,}:candidate-${GITHUB_SHA}"
+          args=()
+          for tag in $TAGS; do args+=(--tag "$tag"); done
+          docker buildx imagetools create "${args[@]}" "$candidate"
+          echo "CANDIDATE=$candidate" >> "$GITHUB_ENV"
 
       - name: Résumé
         env:
@@ -396,8 +397,9 @@ jobs:
         run: |
           {
             echo "### Image publiée : ${APP_DIR}"
-            echo "Identifiant de l'image testée : \`$(docker image inspect --format '{{.Id}}' app:ci)\`"
             echo '```'
+            docker buildx imagetools inspect "$CANDIDATE" | head -3
+            echo
             echo "$TAGS"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

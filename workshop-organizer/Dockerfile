@@ -3,19 +3,12 @@ FROM gradle:8.7-jdk21 AS build
 
 WORKDIR /app
 
-# Cache des dépendances
+# Gradle 8.7 est déjà installé dans l'image : on l'utilise directement plutôt que ./gradlew,
+# qui retéléchargerait la même distribution (version identique à gradle-wrapper.properties).
+
+# Cache des dépendances : couche réutilisée tant que build.gradle et settings.gradle ne changent pas
 COPY build.gradle settings.gradle ./
-COPY gradle ./gradle
-COPY gradlew ./
-
-# Conversion Windows CRLF -> Linux LF
-RUN sed -i 's/\r$//' ./gradlew
-
-# Rend le wrapper Gradle exécutable
-RUN chmod +x ./gradlew
-
-# Cache des dépendances
-RUN ./gradlew dependencies --no-daemon || true
+RUN gradle dependencies --no-daemon
 
 # Code source
 COPY src ./src
@@ -25,9 +18,9 @@ COPY src ./src
 # exécutés par le job « test », inutile de les relancer pendant le build de l'image.
 ARG SKIP_TESTS=false
 RUN if [ "$SKIP_TESTS" = "true" ]; then \
-        ./gradlew clean bootWar --no-daemon; \
+        gradle clean bootWar --no-daemon; \
     else \
-        ./gradlew clean test bootWar --no-daemon; \
+        gradle clean test bootWar --no-daemon; \
     fi
 
 

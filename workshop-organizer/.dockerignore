@@ -1,0 +1,26 @@
+# Contexte de build limité à ce que le Dockerfile utilise :
+# build.gradle, settings.gradle, src/ et entrypoint.sh
+
+# Sorties de compilation locales (Gradle, IDE)
+build/
+bin/
+.gradle/
+out/
+
+# Secrets et configuration locale : ne doivent jamais entrer dans le contexte de build
+secrets/
+.env
+*.env
+
+# Fichiers sans rapport avec l'image
+db/
+k8s/
+gradle/
+gradlew
+gradlew.bat
+docker-compose.yml
+values.tpl.yaml
+system.properties
+*.md
+Dockerfile
+.dockerignore
