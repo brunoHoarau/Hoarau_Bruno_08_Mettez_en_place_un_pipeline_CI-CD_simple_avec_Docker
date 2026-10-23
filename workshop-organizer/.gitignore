@@ -42,5 +42,6 @@ java-generated/
 
 .env
 secrets/
+k8s/secret.yaml
 # Rapports de tests
 /test-results
