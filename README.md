@@ -32,8 +32,8 @@ flowchart LR
     C[secrets-scan]
     B --> P[publish]
     C --> P
-    D -- image testée --> P
-    P --> E[(GHCR)]
+    D -- candidate-sha --> E[(GHCR)]
+    P -- tags définitifs --> E
 ```
 
 | Job | Rôle |
@@ -41,10 +41,11 @@ flowchart LR
 | `changes` | détecte les applications modifiées et leur type (node / java) → matrice |
 | `test` | `run-tests.sh <app>`, rapport JUnit dans l'onglet *Checks* |
 | `secrets-scan` | Gitleaks sur tout l'historique |
-| `build` | build de l'image, smoke test, export de l'image testée (en parallèle des tests) |
-| `publish` | push sur GHCR de l'image testée, si `test`, `secrets-scan` et `build` sont verts (pas sur les PR) |
+| `build` | build de l'image, smoke test, puis push de l'image testée sous le tag provisoire `candidate-<sha>` (en parallèle des tests) |
+| `publish` | si `test`, `secrets-scan` et `build` sont verts : ajoute les tags définitifs à l'image candidate, sans la reconstruire (`skopeo copy --preserve-digests` : même digest que l'image testée). Pas sur les PR |
 
 Tags publiés : `<branche>-<sha court>`, `<branche>`, `latest` (sur `main`).
+Cache de build Docker : tag `buildcache` de chaque image sur GHCR, partagé entre branches (lu seulement sur les PR).
 
 ### Secret requis
 
@@ -107,6 +108,11 @@ Depuis `workshop-organizer/` :
 ```
 
 Procédures complètes : `dossier-exploitation.pdf`.
+
+## Kubernetes
+
+Manifestes dans `<application>/k8s/`. Le Secret des identifiants PostgreSQL n'est pas versionné : il est créé
+au déploiement (voir `workshop-organizer/k8s/README.md`).
 
 ## Dépannage
 
